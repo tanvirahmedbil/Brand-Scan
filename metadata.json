@@ -1,0 +1,6 @@
+{
+  "name": "Brand Extractor",
+  "description": "Extract a formatted guide for the branding idea that includes colors, logo file, and typography suggestions from a website link.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
