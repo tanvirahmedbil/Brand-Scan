@@ -36,8 +36,15 @@ export default function App() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to analyze website');
+        let errorMessage = 'Failed to analyze website';
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorMessage;
+        } catch (parseErr) {
+          // If JSON parsing fails (e.g., received an HTML 404 page from Netlify)
+          errorMessage = `Server Error (${response.status}): The API endpoint could not be reached.`;
+        }
+        throw new Error(errorMessage);
       }
 
       const data: BrandGuide = await response.json();
