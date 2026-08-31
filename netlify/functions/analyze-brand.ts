@@ -16,13 +16,19 @@ const handler: Handler = async (event: HandlerEvent, context: HandlerContext) =>
       return { statusCode: 400, body: JSON.stringify({ error: "URL is required" }) };
     }
 
-    // Fetch the webpage HTML
+    // Fetch the webpage HTML with a strict timeout to prevent 504 errors
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500); // 3.5 seconds max
+
     const response = await fetch(url, {
+      signal: controller.signal,
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
       },
     });
+    
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       return {
@@ -46,10 +52,10 @@ const handler: Handler = async (event: HandlerEvent, context: HandlerContext) =>
         styles += $(el).html() + '\n';
     });
 
-    const bodyText = $('body').text().replace(/\s+/g, ' ').trim().slice(0, 10000);
+    const bodyText = $('body').text().replace(/\s+/g, ' ').trim().slice(0, 3000);
     const headLinks = $('head link[rel="stylesheet"]').map((i, el) => $(el).attr('href')).get().join(', ');
-    const images = $('img').map((i, el) => $(el).attr('src')).get().join(', ');
-    const headStyles = styles.slice(0, 20000);
+    const images = $('img').map((i, el) => $(el).attr('src')).get().join(', ').slice(0, 1000);
+    const headStyles = styles.slice(0, 3000);
 
     const contextText = `
       Here is some context extracted from the URL: ${url}
@@ -170,6 +176,9 @@ const handler: Handler = async (event: HandlerEvent, context: HandlerContext) =>
 
   } catch (error: any) {
     console.error(error);
+    if (error.name === 'AbortError') {
+      return { statusCode: 504, body: JSON.stringify({ error: "The target website took too long to respond. Please try another URL." }) };
+    }
     return { statusCode: 500, body: JSON.stringify({ error: error.message || "An unexpected error occurred." }) };
   }
 };
