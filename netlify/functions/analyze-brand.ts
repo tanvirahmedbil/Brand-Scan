@@ -15,10 +15,9 @@ const handler: Handler = async (event: HandlerEvent, context: HandlerContext) =>
     if (!url) {
       return { statusCode: 400, body: JSON.stringify({ error: "URL is required" }) };
     }
-
-    // Fetch the webpage HTML with a strict timeout to prevent 504 errors
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3500); // 3.5 seconds max
+// Fetch the webpage HTML with a generous timeout
+ const controller = new AbortController();
+ const timeoutId = setTimeout(() => controller.abort(), 8500); // 8.5 seconds max
 
     const response = await fetch(url, {
       signal: controller.signal,
