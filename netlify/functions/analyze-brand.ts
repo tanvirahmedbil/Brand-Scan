@@ -1,8 +1,15 @@
 import type { Handler, HandlerEvent, HandlerContext } from "@netlify/functions";
-import { GoogleGenAI, Type } from "@google/genai";
 import * as cheerio from "cheerio";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+function getMostFrequent(arr: string[], count = 1, defaultVal = '') {
+    const freq: Record<string, number> = {};
+    for (const item of arr) {
+        if (item) freq[item] = (freq[item] || 0) + 1;
+    }
+    const sorted = Object.entries(freq).sort((a, b) => b[1] - a[1]).map(e => e[0]);
+    if (count === 1) return sorted[0] || defaultVal;
+    return sorted.slice(0, count);
+}
 
 const handler: Handler = async (event: HandlerEvent, context: HandlerContext) => {
   if (event.httpMethod !== "POST") {
@@ -15,9 +22,10 @@ const handler: Handler = async (event: HandlerEvent, context: HandlerContext) =>
     if (!url) {
       return { statusCode: 400, body: JSON.stringify({ error: "URL is required" }) };
     }
-// Fetch the webpage HTML with a generous timeout
- const controller = new AbortController();
- const timeoutId = setTimeout(() => controller.abort(), 8500); // 8.5 seconds max
+
+    // Fetch the webpage HTML with a generous timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8500); // 8.5 seconds max
 
     const response = await fetch(url, {
       signal: controller.signal,
@@ -38,140 +46,115 @@ const handler: Handler = async (event: HandlerEvent, context: HandlerContext) =>
 
     const html = await response.text();
     
-    // Parse the HTML using cheerio to extract text and styles
-    const $ = cheerio.load(html);
+    // Extract Hex Colors
+    const hexRegex = /#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})\b/gi;
+    const hexMatches = html.match(hexRegex) || [];
+    const hexCounts: Record<string, number> = {};
     
-    $('script').remove();
-    $('svg').remove();
-    $('noscript').remove();
-    $('iframe').remove();
+    hexMatches.forEach(hex => {
+        const upperHex = hex.toUpperCase();
+        // Normalize 3-char hex to 6-char hex
+        const normalized = upperHex.length === 4 
+            ? '#' + upperHex[1]+upperHex[1]+upperHex[2]+upperHex[2]+upperHex[3]+upperHex[3] 
+            : upperHex;
+        hexCounts[normalized] = (hexCounts[normalized] || 0) + 1;
+    });
+
+    const topColors = Object.entries(hexCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(entry => entry[0]);
+        
+    const primary = topColors[0] || '#0A0D14';
+    const secondary = topColors[1] || topColors[0] || '#FF3B30';
+    const accent = topColors[2] || topColors[0] || '#FF9500';
+    const button = topColors[3] || topColors[1] || topColors[0] || '#FF3B30';
+    
+    // Parse the HTML using cheerio
+    const $ = cheerio.load(html);
+    $('script, svg, noscript, iframe').remove();
 
     let styles = '';
     $('style').each((i, el) => {
         styles += $(el).html() + '\n';
     });
 
-    const bodyText = $('body').text().replace(/\s+/g, ' ').trim().slice(0, 3000);
-    const headLinks = $('head link[rel="stylesheet"]').map((i, el) => $(el).attr('href')).get().join(', ');
-    const images = $('img').map((i, el) => $(el).attr('src')).get().join(', ').slice(0, 1000);
-    const headStyles = styles.slice(0, 3000);
-
-    const contextText = `
-      Here is some context extracted from the URL: ${url}
-      Images found on the page: ${images}
-      Stylesheets referenced: ${headLinks}
-      Inline Styles: ${headStyles}
-      Body Text Snippet: ${bodyText}
-    `;
-
-    const genResponse = await ai.models.generateContent({
-      model: "gemini-3.6-flash",
-      contents: [
-        {
-          role: "user",
-          parts: [{
-            text: `You are an expert brand analyst and web designer. Extract a formatted guide for the branding idea from the provided website context.
-            If you cannot find exact colors, logo, or typography, infer them based on standard modern web design practices that match the context.
-            
-            Keep it minimal. Only return the necessary info matching the schema exactly.
-            
-            Context:
-            ${contextText}`
-          }]
+    // Font extraction
+    const fontRegex = /font-family:\s*([^;}]+)/gi;
+    const fontMatches: string[] = [];
+    let match;
+    while ((match = fontRegex.exec(styles)) !== null) {
+        let family = match[1].split(',')[0].replace(/['"]/g, '').trim();
+        if(family && !family.includes('var(')) fontMatches.push(family);
+    }
+    
+    // Check Google Fonts links
+    $('link[rel="stylesheet"]').each((i, el) => {
+        const href = $(el).attr('href') || '';
+        if (href.includes('fonts.googleapis.com')) {
+            const urlParams = new URLSearchParams(href.split('?')[1] || '');
+            const families = urlParams.getAll('family');
+            families.forEach(f => {
+                const familyName = f.split(':')[0].replace(/\+/g, ' ');
+                if (familyName) fontMatches.push(familyName);
+            });
         }
-      ],
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            colors: {
-              type: Type.OBJECT,
-              properties: {
-                primary: { type: Type.STRING, description: "Primary brand color HEX code" },
-                secondary: { type: Type.STRING, description: "Secondary brand color HEX code" },
-                accent: { type: Type.STRING, description: "Accent brand color HEX code" },
-                button: { type: Type.STRING, description: "Button or call-to-action color HEX code" },
-              },
-              required: ["primary", "secondary", "accent", "button"]
-            },
-            uiStyling: {
-              type: Type.OBJECT,
-              properties: {
-                borderRadius: { type: Type.STRING, description: "General border radius style used for UI components (e.g., Sharp 0px, Soft Rounded 8px, Pill 99px)" },
-                shadowStyle: { type: Type.STRING, description: "General shadow or depth style for UI components (e.g., Flat brutalist, Soft diffused, Hard offset)" }
-              },
-              required: ["borderRadius", "shadowStyle"]
-            },
-            typography: {
-              type: Type.OBJECT,
-              properties: {
-                fonts: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: "List of main font families used"
-                },
-                headings: {
-                  type: Type.OBJECT,
-                  properties: {
-                    h1: {
-                      type: Type.OBJECT,
-                      properties: {
-                        fontFamily: { type: Type.STRING },
-                        fontSize: { type: Type.STRING },
-                        lineHeight: { type: Type.STRING }
-                      },
-                      required: ["fontFamily", "fontSize", "lineHeight"]
-                    },
-                    h2: {
-                      type: Type.OBJECT,
-                      properties: {
-                        fontFamily: { type: Type.STRING },
-                        fontSize: { type: Type.STRING },
-                        lineHeight: { type: Type.STRING }
-                      },
-                      required: ["fontFamily", "fontSize", "lineHeight"]
-                    },
-                    h3: {
-                      type: Type.OBJECT,
-                      properties: {
-                        fontFamily: { type: Type.STRING },
-                        fontSize: { type: Type.STRING },
-                        lineHeight: { type: Type.STRING }
-                      },
-                      required: ["fontFamily", "fontSize", "lineHeight"]
-                    }
-                  },
-                  required: ["h1", "h2", "h3"]
-                },
-                bodyText: {
-                  type: Type.OBJECT,
-                  properties: {
-                    fontFamily: { type: Type.STRING },
-                    fontSize: { type: Type.STRING },
-                    lineHeight: { type: Type.STRING }
-                  },
-                  required: ["fontFamily", "fontSize", "lineHeight"]
-                }
-              },
-              required: ["fonts", "headings", "bodyText"]
-            }
-          },
-          required: ["colors", "uiStyling", "typography"]
-        }
-      }
     });
 
-    const text = genResponse.text;
-    if (text) {
-      return {
-        statusCode: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(JSON.parse(text)),
-      };
-    } else {
-      return { statusCode: 500, body: JSON.stringify({ error: "Failed to generate response." }) };
+    let topFonts = getMostFrequent(fontMatches, 4) as string[];
+    if (topFonts.length === 0) topFonts = ["Inter", "System UI"];
+    
+    const mainFont = topFonts[0];
+    const headingFont = topFonts.length > 1 ? topFonts[0] : mainFont;
+    const bodyFont = topFonts.length > 1 ? topFonts[1] : mainFont;
+
+    // Border radius
+    const radiusRegex = /border-radius:\s*([^;}]+)/gi;
+    const radiusMatches: string[] = [];
+    while ((match = radiusRegex.exec(styles)) !== null) {
+        if (!match[1].includes('var(')) radiusMatches.push(match[1].trim());
     }
+    const topRadius = getMostFrequent(radiusMatches, 1, '8px') as string;
+    let radiusText = 'Sharp 0px';
+    const radiusVal = parseInt(topRadius);
+    if (topRadius.includes('%') || radiusVal > 20) radiusText = `Pill ${topRadius}`;
+    else if (radiusVal > 0) radiusText = `Rounded ${topRadius}`;
+
+    // Shadow
+    const shadowRegex = /box-shadow:\s*([^;}]+)/gi;
+    const shadowMatches: string[] = [];
+    while ((match = shadowRegex.exec(styles)) !== null) {
+        if (!match[1].includes('none') && !match[1].includes('var(')) shadowMatches.push(match[1].trim());
+    }
+    const topShadow = getMostFrequent(shadowMatches, 1, 'none') as string;
+    const shadowText = topShadow !== 'none' ? 'Soft diffused drop shadow' : 'Flat brutalist (No shadow)';
+
+    const jsonResponse = {
+      colors: {
+        primary,
+        secondary,
+        accent,
+        button
+      },
+      uiStyling: {
+        borderRadius: radiusText,
+        shadowStyle: shadowText
+      },
+      typography: {
+        fonts: topFonts,
+        headings: {
+          h1: { fontFamily: headingFont, fontSize: "48px", lineHeight: "1.2" },
+          h2: { fontFamily: headingFont, fontSize: "36px", lineHeight: "1.25" },
+          h3: { fontFamily: headingFont, fontSize: "24px", lineHeight: "1.3" }
+        },
+        bodyText: { fontFamily: bodyFont, fontSize: "16px", lineHeight: "1.6" }
+      }
+    };
+
+    return {
+      statusCode: 200,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(jsonResponse),
+    };
 
   } catch (error: any) {
     console.error(error);
